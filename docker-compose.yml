@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: agentic-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agentic_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentic-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - agentic-network
+
+  ingestion-service:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile
+    container_name: agentic-ingestion
+    ports:
+      - "8001:8001"
+    environment:
+      - LOG_LEVEL=info
+    volumes:
+      - ./data/uploads:/app/uploads
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - agentic-network
+
+  embedding-service:
+    build:
+      context: ./services/embedding
+      dockerfile: Dockerfile
+    container_name: agentic-embedding
+    ports:
+      - "8002:8002"
+    environment:
+      - LOG_LEVEL=info
+    networks:
+      - agentic-network
+
+  vector-db-service:
+    build:
+      context: ./services/vector-db
+      dockerfile: Dockerfile
+    container_name: agentic-vector-db
+    ports:
+      - "8003:8003"
+    environment:
+      - LOG_LEVEL=info
+    volumes:
+      - vector_db_data:/app/data
+    networks:
+      - agentic-network
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    container_name: agentic-orchestrator
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/agentic_ai
+      - REDIS_URL=redis://redis:6379
+      - INGESTION_SERVICE_URL=http://ingestion-service:8001
+      - EMBEDDING_SERVICE_URL=http://embedding-service:8002
+      - VECTOR_DB_SERVICE_URL=http://vector-db-service:8003
+      - LOG_LEVEL=info
+      - JWT_SECRET=dev-secret-change-in-production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ingestion-service:
+        condition: service_started
+      embedding-service:
+        condition: service_started
+      vector-db-service:
+        condition: service_started
+    networks:
+      - agentic-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: agentic-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # Use localhost here because this env var is read by the BROWSER, not the container
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1 
+    depends_on:
+      - orchestrator
+    networks:
+      - agentic-network
+
+volumes:
+  postgres_data:
+  vector_db_data:
+
+networks:
+  agentic-network:
+    driver: bridge
