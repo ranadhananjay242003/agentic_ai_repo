@@ -92,6 +92,7 @@ services:
       - VECTOR_DB_SERVICE_URL=http://vector-db-service:8003
       - LOG_LEVEL=info
       - JWT_SECRET=dev-secret-change-in-production
+      - GROQ_API_KEY=${GROQ_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
