@@ -97,6 +97,11 @@ services:
       - SMTP_HOST=smtp.gmail.com  
       - SMTP_USER=dhananjayrana24@gmail.com
       - SMTP_PASS=gbegxsgfayeopwkb
+      - JIRA_DOMAIN=${JIRA_DOMAIN}
+      - JIRA_USER=${JIRA_USER}
+      - JIRA_TOKEN=${JIRA_TOKEN}
+      - JIRA_PROJECT_KEY=${JIRA_PROJECT_KEY}
+
     depends_on:
       postgres:
         condition: service_healthy
