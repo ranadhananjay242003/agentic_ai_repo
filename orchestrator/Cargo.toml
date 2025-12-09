@@ -6,49 +6,30 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-# Web framework
 warp = { workspace = true }
+tokio = { workspace = true }
 serde = { workspace = true }
-reqwest = { version = "0.11", features = ["json", "multipart"] }
-serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
-bytes = "1"  # <--- ADDED THIS LINE
-
-# Database
+serde_json = { workspace = true }
+bytes = { workspace = true }
+reqwest = { workspace = true }
+lettre = { workspace = true }
 sqlx = { workspace = true }
-
-# Redis
 redis = { workspace = true }
-
-# Tracing
+uuid = { workspace = true }
+chrono = { workspace = true }
+config = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+jsonwebtoken = { workspace = true }
+bcrypt = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
-
-# WebSocket
-tokio-tungstenite = { workspace = true }
 futures = { workspace = true }
 
-# UUID and time
-uuid = { workspace = true }
-chrono = { workspace = true }
-
-# Configuration
-config = { workspace = true }
-dotenvy = { workspace = true }
-
-# Error handling
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-
-# Security
-jsonwebtoken = { workspace = true }
-bcrypt = { workspace = true }
-
-# Prometheus metrics
+# Local only deps
 prometheus = "0.13"
-
-# Rate limiting
 governor = "0.6"

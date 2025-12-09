@@ -93,6 +93,9 @@ services:
       - LOG_LEVEL=info
       - JWT_SECRET=dev-secret-change-in-production
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - SMTP_HOST=smtp.gmail.com  
+      - SMTP_USER=dhananjayrana24@gmail.com
+      - SMTP_PASS=gbegxsgfayeopwkb
     depends_on:
       postgres:
         condition: service_healthy

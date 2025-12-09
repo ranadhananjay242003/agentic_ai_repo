@@ -6,26 +6,27 @@ use tracing::{info, error};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use serde_json::Value;
+// Update imports to include Mailbox and remove unused ones
+use lettre::{Message, AsyncTransport, Tokio1Executor, AsyncSmtpTransport};
+use lettre::message::Mailbox; 
+use lettre::transport::smtp::authentication::Credentials;
+use std::env;
 
 // Define a struct matching the REAL database schema
 #[derive(Serialize, FromRow)]
 struct PendingActionDTO {
     id: Uuid,
     action_type: String,
-    // We map the DB 'payload' (jsonb) column to a serde_json::Value
-    payload: Value, 
+    payload: Value,
     status: String,
-    // created_at is strictly needed for sorting, handled by sqlx
 }
 
 pub async fn handle_get_pending(
-    params: std::collections::HashMap<String, String>,
+    _params: std::collections::HashMap<String, String>,
     db_pool: DbPool,
 ) -> Result<impl Reply, Rejection> {
-    // We ignore user_id filter for now to ensure you see ALL actions for debugging
     info!("Fetching pending actions...");
 
-    // 1. SELECT using the CORRECT column names
     let result = sqlx::query_as::<_, PendingActionDTO>(
         "SELECT id, action_type, payload, status 
          FROM pending_actions 
@@ -36,19 +37,14 @@ pub async fn handle_get_pending(
     .await;
 
     match result {
-        Ok(actions) => {
-            info!("Found {} pending actions", actions.len());
-            Ok(warp::reply::json(&actions))
-        },
+        Ok(actions) => Ok(warp::reply::json(&actions)),
         Err(e) => {
             error!("Failed to fetch pending actions: {}", e);
-            // Return empty list on error so frontend doesn't crash
             Ok(warp::reply::json(&Vec::<PendingActionDTO>::new()))
         }
     }
 }
 
-// Request struct for approval
 #[derive(Deserialize)]
 pub struct ApproveRequest {
     pub action_id: Uuid,
@@ -65,8 +61,8 @@ pub async fn handle_approve(
 
     let status = if request.approved { "approved" } else { "rejected" };
 
-    // Update status in DB
-    let result = sqlx::query(
+    // 1. Update Database Status
+    let update_result = sqlx::query(
         "UPDATE pending_actions 
          SET status = $1, approved_at = NOW(), approved_by = $2 
          WHERE id = $3"
@@ -77,11 +73,65 @@ pub async fn handle_approve(
     .execute(&db_pool)
     .await;
 
-    match result {
-        Ok(_) => Ok(warp::reply::json(&serde_json::json!({"status": "success"}))),
-        Err(e) => {
-            error!("Failed to update action: {}", e);
-            Ok(warp::reply::json(&serde_json::json!({"status": "error", "message": e.to_string()})))
+    if let Err(e) = update_result {
+        return Ok(warp::reply::json(&serde_json::json!({"status": "error", "message": e.to_string()})));
+    }
+
+    // 2. EXECUTE THE REAL ACTION (If approved)
+    if request.approved {
+        let action_row = sqlx::query_as::<_, PendingActionDTO>(
+            "SELECT id, action_type, payload, status FROM pending_actions WHERE id = $1"
+        )
+        .bind(request.action_id)
+        .fetch_optional(&db_pool)
+        .await;
+
+        if let Ok(Some(action)) = action_row {
+            if action.action_type == "EMAIL_ALERT" {
+                info!("Executing Email Action...");
+                let send_result = send_real_email(&action.payload).await;
+                match send_result {
+                    Ok(_) => info!("Email sent successfully!"),
+                    Err(e) => error!("Failed to send email: {}", e),
+                }
+            } else if action.action_type == "JIRA_TICKET" {
+                info!("Executing Jira Action (Mock)... Ticket created in system.");
+            }
         }
     }
+
+    Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
+}
+
+// --- HELPER FUNCTION: SEND EMAIL ---
+async fn send_real_email(payload: &Value) -> Result<(), String> {
+    let smtp_host = env::var("SMTP_HOST").unwrap_or("smtp.gmail.com".to_string());
+    let smtp_user = env::var("SMTP_USER").unwrap_or("".to_string());
+    let smtp_pass = env::var("SMTP_PASS").unwrap_or("".to_string());
+
+    if smtp_user.is_empty() || smtp_pass.is_empty() {
+        return Err("SMTP credentials missing in docker-compose.yml".to_string());
+    }
+
+    let description = payload["description"].as_str().unwrap_or("No description");
+    let recipient = payload["recipient"].as_str().unwrap_or("admin@example.com");
+
+    // FIX: Explicitly parse into <Mailbox> to satisfy the compiler
+    let email = Message::builder()
+        .from(format!("Agentic AI <{}>", smtp_user).parse::<Mailbox>().unwrap())
+        .to(recipient.parse::<Mailbox>().map_err(|e| e.to_string())?)
+        .subject("🚨 Agentic AI Alert: Action Required")
+        .body(format!("The following action was approved and executed:\n\n{}", description))
+        .map_err(|e| e.to_string())?;
+
+    let creds = Credentials::new(smtp_user, smtp_pass);
+
+    let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_host)
+        .map_err(|e| e.to_string())?
+        .credentials(creds)
+        .build();
+
+    mailer.send(email).await.map_err(|e| e.to_string())?;
+
+    Ok(())
 }

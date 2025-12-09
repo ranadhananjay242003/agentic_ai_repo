@@ -29,7 +29,7 @@ pub async fn handle_query(
     let q_lower = request.query.to_lowercase();
     let mut pending_action_ids = vec![];
     
-    // --- PATH A: HEURISTIC ACTIONS ---
+    // --- PATH A: DECISION LOGIC (Tickets) ---
     if q_lower.contains("ticket") || q_lower.contains("incident") {
         let action_id = Uuid::new_v4();
         let payload = json!({ "description": format!("Create JIRA Ticket: '{}'", request.query), "priority": "high" });
@@ -47,8 +47,32 @@ pub async fn handle_query(
             pending_actions: pending_action_ids,
         }));
     }
+    
+    // --- PATH B: DECISION LOGIC (Emails) --- <--- RESTORED THIS BLOCK
+    else if q_lower.contains("email") || q_lower.contains("alert") {
+        let action_id = Uuid::new_v4();
+        // You can change the recipient here or extract it from the query in the future
+        let payload = json!({ 
+            "description": format!("Send Email Alert: '{}'", request.query), 
+            "recipient": "dhananjayrana24@gmail.com", // Defaults to your configured email
+            "priority": "high" 
+        });
+        
+        let _ = sqlx::query("INSERT INTO pending_actions (id, request_id, action_type, target_service, payload, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())")
+            .bind(action_id).bind(request_id).bind("EMAIL_ALERT").bind("smtp").bind(payload).bind("pending")
+            .execute(&db_pool).await;
+            
+        pending_action_ids.push(action_id);
+        
+        return Ok(warp::reply::json(&QueryResponse {
+            request_id,
+            summary: format!("✅ I have drafted an email alert for you. Check the 'Pending Actions' tab to approve and send it.\n(Action ID: {})", action_id),
+            citations: vec![],
+            pending_actions: pending_action_ids,
+        }));
+    }
 
-    // --- PATH B: REAL AI (RAG + Groq) ---
+    // --- PATH C: REAL AI (RAG + Groq) ---
     
     let client = reqwest::Client::new();
     let embedding_service_url = env::var("EMBEDDING_SERVICE_URL").unwrap_or("http://embedding-service:8002".to_string());
@@ -57,7 +81,7 @@ pub async fn handle_query(
     let mut context_text = String::new();
     let mut citations = Vec::new();
 
-    // STEP 1: Embed the User's Query (Text -> Numbers)
+    // STEP 1: Embed
     info!("Embedding query...");
     let embed_res = client.post(format!("{}/embed", embedding_service_url))
         .json(&json!({ "texts": [request.query] }))
@@ -66,72 +90,47 @@ pub async fn handle_query(
 
     let mut query_vector: Option<Vec<f64>> = None;
 
-    match embed_res {
-        Ok(resp) => {
-            if let Ok(json_data) = resp.json::<Value>().await {
-                if let Some(vecs) = json_data["embeddings"].as_array() {
-                    if let Some(first_vec) = vecs.get(0).and_then(|v| v.as_array()) {
-                         // Convert JSON numbers to Rust f64 vector
-                         let v: Vec<f64> = first_vec.iter().map(|n| n.as_f64().unwrap_or(0.0)).collect();
-                         query_vector = Some(v);
+    if let Ok(resp) = embed_res {
+        if let Ok(json_data) = resp.json::<Value>().await {
+            if let Some(vecs) = json_data["embeddings"].as_array() {
+                if let Some(first_vec) = vecs.get(0).and_then(|v| v.as_array()) {
+                        let v: Vec<f64> = first_vec.iter().map(|n| n.as_f64().unwrap_or(0.0)).collect();
+                        query_vector = Some(v);
+                }
+            }
+        }
+    }
+
+    // STEP 2: Search
+    if let Some(vector) = query_vector {
+        info!("Searching Vector DB...");
+        let search_res = client.post(format!("{}/search/hybrid", vector_service_url))
+            .json(&json!({ "query_vector": vector, "query_text": request.query, "top_k": 3, "hybrid": true }))
+            .send()
+            .await;
+
+        if let Ok(resp) = search_res {
+            if let Ok(results) = resp.json::<Value>().await {
+                if let Some(matches) = results["results"].as_array() {
+                    for m in matches {
+                        let text = m["metadata"]["text"].as_str().unwrap_or("").to_string();
+                        let score = m["score"].as_f64().unwrap_or(0.0) as f32;
+                        if !text.is_empty() {
+                            context_text.push_str(&format!("- {}\n", text));
+                            citations.push(Citation {
+                                doc_id: Uuid::new_v4(), passage_id: Uuid::new_v4(),
+                                page: m["metadata"]["page"].as_i64().map(|v| v as i32),
+                                text: text.chars().take(150).collect(), relevance_score: score,
+                            });
+                        }
                     }
                 }
             }
         }
-        Err(e) => error!("Embedding service failed: {}", e),
-    }
-
-    // STEP 2: Search Vector DB (using the vector we just got)
-    if let Some(vector) = query_vector {
-        info!("Searching Vector DB with vector...");
-        
-        let search_res = client.post(format!("{}/search/hybrid", vector_service_url)) // <--- FIXED URL
-            .json(&json!({ 
-                "query_vector": vector,
-                "query_text": request.query,
-                "top_k": 3,
-                "hybrid": true
-            }))
-            .send()
-            .await;
-
-        match search_res {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    if let Ok(results) = resp.json::<Value>().await {
-                        if let Some(matches) = results["results"].as_array() {
-                            for m in matches {
-                                let metadata = &m["metadata"];
-                                let text = metadata["text"].as_str().unwrap_or("").to_string();
-                                let score = m["score"].as_f64().unwrap_or(0.0) as f32;
-                                
-                                if !text.is_empty() {
-                                    context_text.push_str(&format!("- {}\n", text));
-                                    citations.push(Citation {
-                                        doc_id: Uuid::new_v4(), 
-                                        passage_id: Uuid::new_v4(),
-                                        page: metadata["page"].as_i64().map(|v| v as i32),
-                                        text: text.chars().take(150).collect(),
-                                        relevance_score: score,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    warn!("Vector DB returned error: {}", resp.status());
-                }
-            },
-            Err(e) => warn!("Vector DB Unreachable: {}", e),
-        }
-    } else {
-        warn!("Skipping vector search because embedding failed.");
     }
 
     if context_text.is_empty() {
         context_text = "No specific documents found. Answer based on general knowledge.".to_string();
-    } else {
-        info!("RAG Context found ({} chars)", context_text.len());
     }
 
     // STEP 3: Call Groq
@@ -156,28 +155,18 @@ pub async fn handle_query(
             .send()
             .await;
 
-        match llm_res {
-            Ok(resp) => {
-                if let Ok(json_resp) = resp.json::<Value>().await {
-                    if let Some(content) = json_resp["choices"][0]["message"]["content"].as_str() {
-                        summary = content.to_string();
-                    } else {
-                        summary = format!("⚠️ Groq Error: {:?}", json_resp);
-                    }
-                }
-            },
-            Err(e) => {
-                summary = format!("⚠️ Network Error: {}", e);
+        if let Ok(resp) = llm_res {
+            if let Ok(json_resp) = resp.json::<Value>().await {
+                if let Some(content) = json_resp["choices"][0]["message"]["content"].as_str() {
+                    summary = content.to_string();
+                } else { summary = "⚠️ Error parsing Groq response".to_string(); }
             }
-        }
+        } else { summary = "⚠️ Network Error".to_string(); }
     } else {
         summary = "⚠️ GROQ_API_KEY is missing.".to_string();
     }
 
     Ok(warp::reply::json(&QueryResponse {
-        request_id,
-        summary,
-        citations, 
-        pending_actions: vec![],
+        request_id, summary, citations, pending_actions: vec![],
     }))
 }
