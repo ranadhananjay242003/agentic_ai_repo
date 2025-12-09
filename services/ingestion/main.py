@@ -1,17 +1,18 @@
 """
 Document Ingestion Service
-Extracts text and metadata from various document formats (Text + OCR)
+Extracts text and metadata from various document formats (Text + OCR + Audio)
 """
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
 import sys
 import io
+import os
+import requests
 from pathlib import Path
 
-# --- OCR IMPORTS ---
+# --- IMPORTS ---
 import pytesseract
 from PIL import Image
 
@@ -28,22 +29,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Document Ingestion Service", version="1.1.0")
+app = FastAPI(title="Document Ingestion Service", version="1.2.0")
 
-# --- CUSTOM IMAGE EXTRACTOR ---
+# --- CUSTOM EXTRACTORS ---
+
 class ImageExtractor:
     """Extracts text from images using Tesseract OCR"""
     def extract(self, content: bytes) -> tuple[str, dict]:
         try:
             image = Image.open(io.BytesIO(content))
-            # Extract text
             text = pytesseract.image_to_string(image)
-            # Metadata
             metadata = {
                 "format": image.format,
                 "width": image.width,
                 "height": image.height,
-                "mode": image.mode,
                 "ocr_engine": "tesseract"
             }
             return text, metadata
@@ -51,12 +50,61 @@ class ImageExtractor:
             logger.error(f"OCR Failed: {e}")
             raise Exception(f"OCR processing failed: {str(e)}")
 
+class AudioExtractor:
+    """Transcribes audio using Groq Whisper API"""
+    def extract(self, content: bytes, filename: str) -> tuple[str, dict]:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise Exception("GROQ_API_KEY not found in environment variables")
+
+        try:
+            # Groq API Endpoint for Audio
+            url = "https://api.groq.com/openai/v1/audio/transcriptions"
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            # Prepare file for upload
+            files = {
+                "file": (filename, content)
+            }
+            
+            data = {
+                "model": "whisper-large-v3", # Using Groq's fast Whisper model
+                "temperature": "0",
+                "response_format": "json"
+            }
+
+            logger.info(f"Sending audio {filename} to Groq Whisper...")
+            response = requests.post(url, headers=headers, files=files, data=data)
+            
+            if response.status_code != 200:
+                logger.error(f"Groq Whisper Error: {response.text}")
+                raise Exception(f"Groq API Error: {response.status_code}")
+
+            result = response.json()
+            text = result.get("text", "")
+            
+            metadata = {
+                "format": "audio",
+                "model": "whisper-large-v3",
+                "provider": "groq"
+            }
+            
+            return text, metadata
+
+        except Exception as e:
+            logger.error(f"Audio Transcription Failed: {e}")
+            raise Exception(f"Transcription failed: {str(e)}")
+
 # Initialize extractors
 pdf_extractor = PDFExtractor()
 docx_extractor = DOCXExtractor()
 pptx_extractor = PPTXExtractor()
 csv_extractor = CSVExtractor()
-image_extractor = ImageExtractor() # New OCR Extractor
+image_extractor = ImageExtractor()
+audio_extractor = AudioExtractor() # NEW!
 
 chunker = PassageChunker(chunk_size=512, overlap=50)
 
@@ -76,17 +124,16 @@ class ExtractionResponse(BaseModel):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "ingestion", "ocr_enabled": True}
+    return {"status": "healthy", "service": "ingestion", "ocr": True, "audio": True}
 
 @app.post("/extract", response_model=ExtractionResponse)
 async def extract_document(file: UploadFile = File(...)):
     """
-    Extract text and passages from uploaded document (Includes OCR)
+    Extract text from Documents, Images, and Audio
     """
     logger.info(f"Received file: {file.filename}, type: {file.content_type}")
     
     try:
-        # Read file content
         content = await file.read()
         text = ""
         metadata = {}
@@ -95,24 +142,25 @@ async def extract_document(file: UploadFile = File(...)):
         if file.content_type == "application/pdf" or file.filename.endswith(".pdf"):
             text, metadata = pdf_extractor.extract(content)
         
-        # 2. Word (DOCX)
-        elif file.content_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
-                                     "application/msword"] or file.filename.endswith((".docx", ".doc")):
+        # 2. Office Docs
+        elif file.filename.endswith((".docx", ".doc")):
             text, metadata = docx_extractor.extract(content)
-        
-        # 3. PowerPoint (PPTX)
-        elif file.content_type in ["application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                     "application/vnd.ms-powerpoint"] or file.filename.endswith((".pptx", ".ppt")):
+        elif file.filename.endswith((".pptx", ".ppt")):
             text, metadata = pptx_extractor.extract(content)
         
-        # 4. CSV
-        elif file.content_type == "text/csv" or file.filename.endswith(".csv"):
+        # 3. CSV
+        elif file.filename.endswith(".csv"):
             text, metadata = csv_extractor.extract(content)
         
-        # 5. IMAGES (OCR) - NEW!
-        elif file.content_type in ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/tiff"]:
+        # 4. IMAGES (OCR)
+        elif file.content_type.startswith("image/") or file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
             logger.info("Image detected, running OCR...")
             text, metadata = image_extractor.extract(content)
+
+        # 5. AUDIO (Whisper) - NEW!
+        elif file.content_type.startswith("audio/") or file.filename.lower().endswith((".mp3", ".wav", ".m4a", ".ogg")):
+            logger.info("Audio detected, running Whisper...")
+            text, metadata = audio_extractor.extract(content, file.filename)
 
         # 6. Text Files
         elif file.content_type == "text/plain" or file.filename.endswith(".txt"):
@@ -122,12 +170,11 @@ async def extract_document(file: UploadFile = File(...)):
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
         
-        # Validation
         if not text or not text.strip():
             logger.warning(f"No text extracted from {file.filename}")
-            text = "[No text found in document]"
+            text = "[No text found]"
 
-        logger.info(f"Extracted {len(text)} characters from {file.filename}")
+        logger.info(f"Extracted {len(text)} characters")
         
         # Chunk into passages
         passages_data = chunker.chunk(text, metadata)
@@ -144,8 +191,6 @@ async def extract_document(file: UploadFile = File(...)):
             for p in passages_data
         ]
         
-        logger.info(f"Created {len(passages)} passages")
-        
         return ExtractionResponse(
             filename=file.filename,
             content_type=file.content_type or "unknown",
@@ -155,7 +200,6 @@ async def extract_document(file: UploadFile = File(...)):
     
     except Exception as e:
         logger.error(f"Error extracting document: {str(e)}")
-        # Print stack trace in logs for debugging
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
