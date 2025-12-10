@@ -24,17 +24,12 @@ pub async fn handle_get_pending(
     _params: std::collections::HashMap<String, String>,
     db_pool: DbPool,
 ) -> Result<impl Reply, Rejection> {
-    info!("Fetching pending actions...");
     let result = sqlx::query_as::<_, PendingActionDTO>(
         "SELECT id, action_type, payload, status FROM pending_actions WHERE status = 'pending' OR status = 'PENDING' ORDER BY created_at DESC"
     ).fetch_all(&db_pool).await;
-
     match result {
         Ok(actions) => Ok(warp::reply::json(&actions)),
-        Err(e) => {
-            error!("Failed to fetch pending actions: {}", e);
-            Ok(warp::reply::json(&Vec::<PendingActionDTO>::new()))
-        }
+        Err(e) => { error!("Failed to fetch pending actions: {}", e); Ok(warp::reply::json(&Vec::<PendingActionDTO>::new())) }
     }
 }
 
@@ -70,39 +65,65 @@ pub async fn handle_approve(
 
         if let Ok(Some(action)) = action_row {
             if action.action_type == "EMAIL_ALERT" {
-                info!("Executing Email Action...");
-                if let Err(e) = send_real_email(&action.payload).await {
-                    error!("Failed to send email: {}", e);
-                }
-            } else if action.action_type == "JIRA_TICKET" {
-                info!("Executing Jira Action...");
-                if let Err(e) = create_real_jira_ticket(&action.payload).await {
-                    error!("Failed to create Jira ticket: {}", e);
-                }
+                if let Err(e) = send_real_email(&action.payload).await { error!("Failed to send email: {}", e); }
+            } 
+            else if action.action_type == "JIRA_TICKET" {
+                if let Err(e) = create_real_jira_ticket(&action.payload).await { error!("Failed to create Jira ticket: {}", e); }
+            }
+            // --- NEW: SLACK EXECUTION ---
+            else if action.action_type == "SLACK_ALERT" {
+                if let Err(e) = post_slack_message(&action.payload, &request.user_signature).await { error!("Failed to post Slack message: {}", e); }
             }
         }
     }
     Ok(warp::reply::json(&serde_json::json!({"status": "success"})))
 }
 
-// --- HELPER: SEND EMAIL ---
+// --- HELPER: POST SLACK MESSAGE (NEW FUNCTION) ---
+async fn post_slack_message(payload: &Value, user_signature: &str) -> Result<(), String> {
+    let webhook_url = env::var("SLACK_WEBHOOK_URL").unwrap_or_default();
+
+    if webhook_url.is_empty() {
+        return Err("SLACK_WEBHOOK_URL is not set".to_string());
+    }
+
+    let description = payload["description"].as_str().unwrap_or("Alert from Agentic AI");
+
+    let message = json!({
+        "text": format!("🔔 *Action Approved by {}*\n\n*Action:* Slack Alert\n*Details:* {}", user_signature, description),
+        "mrkdwn": true
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client.post(webhook_url)
+        .json(&message)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.status().is_success() {
+        info!("✅ Slack message posted successfully.");
+        Ok(())
+    } else {
+        Err(format!("Slack API Error: {}", resp.status()))
+    }
+}
+
+
+// --- HELPER: SEND EMAIL (Requires full code in your file) ---
 async fn send_real_email(payload: &Value) -> Result<(), String> {
     let smtp_host = env::var("SMTP_HOST").unwrap_or("smtp.gmail.com".to_string());
     let smtp_user = env::var("SMTP_USER").unwrap_or("".to_string());
     let smtp_pass = env::var("SMTP_PASS").unwrap_or("".to_string());
-
     if smtp_user.is_empty() || smtp_pass.is_empty() { return Err("SMTP creds missing".to_string()); }
-
     let description = payload["description"].as_str().unwrap_or("No description");
     let recipient = payload["recipient"].as_str().unwrap_or("admin@example.com");
-
     let email = Message::builder()
         .from(format!("Agentic AI <{}>", smtp_user).parse::<Mailbox>().unwrap())
         .to(recipient.parse::<Mailbox>().map_err(|e| e.to_string())?)
         .subject("🚨 Agentic AI Alert")
         .body(format!("Action executed:\n\n{}", description))
         .map_err(|e| e.to_string())?;
-
     let creds = Credentials::new(smtp_user, smtp_pass);
     let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_host)
         .map_err(|e| e.to_string())?.credentials(creds).build();
@@ -110,66 +131,24 @@ async fn send_real_email(payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-// --- HELPER: CREATE JIRA TICKET (NEW) ---
+// --- HELPER: CREATE JIRA TICKET (Requires full code in your file) ---
 async fn create_real_jira_ticket(payload: &Value) -> Result<(), String> {
     let domain = env::var("JIRA_DOMAIN").unwrap_or_default();
     let user = env::var("JIRA_USER").unwrap_or_default();
     let token = env::var("JIRA_TOKEN").unwrap_or_default();
     let project_key = env::var("JIRA_PROJECT_KEY").unwrap_or("KAN".to_string());
-
-    if domain.is_empty() || user.is_empty() || token.is_empty() {
-        return Err("Jira credentials missing in docker-compose".to_string());
-    }
-
+    if domain.is_empty() || user.is_empty() || token.is_empty() { return Err("Jira credentials missing".to_string()); }
     let summary = payload["description"].as_str().unwrap_or("AI Generated Ticket");
-    
-    // Construct the Jira API URL
     let url = format!("{}/rest/api/3/issue", domain);
     let client = reqwest::Client::new();
-
-    // Jira Cloud requires "Atlassian Document Format" (ADF) for descriptions
-    let body = json!({
-        "fields": {
-            "project": {
-                "key": project_key
-            },
-            "summary": summary,
-            "description": {
-                "type": "doc",
-                "version": 1,
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": format!("This ticket was automatically created by Agentic AI.\n\nDetails: {}", summary)
-                            }
-                        ]
-                    }
-                ]
-            },
-            "issuetype": {
-                "name": "Task" 
-            }
-        }
-    });
-
-    info!("Sending request to Jira: {}", url);
-
-    let resp = client.post(url)
-        .basic_auth(user, Some(token))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
+    let body = json!({"fields": {"project": {"key": project_key},"summary": summary,"description": {"type": "doc","version": 1,"content": [{"type": "paragraph","content": [{"type": "text","text": format!("This ticket was automatically created by Agentic AI.\n\nDetails: {}", summary)}]}]},"issuetype": {"name": "Task" }}});
+    let resp = client.post(url).basic_auth(user, Some(token)).json(&body).send().await.map_err(|e| e.to_string())?;
     if resp.status().is_success() {
-        let resp_json: Value = resp.json().await.map_err(|e| e.to_string())?;
-        info!("✅ Jira Ticket Created! Key: {}", resp_json["key"]);
+        info!("✅ Jira Ticket Created!");
         Ok(())
     } else {
         let error_text = resp.text().await.unwrap_or_default();
+        error!("Jira API Error Response: {}", error_text);
         Err(format!("Jira API Error: {}", error_text))
     }
 }

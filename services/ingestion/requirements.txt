@@ -1,11 +1,14 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-pdfplumber==0.10.3
-python-docx==1.1.0
-python-pptx==0.6.23
-pandas==2.1.3
-openpyxl==3.1.2
+fastapi
+uvicorn
+python-multipart
+pydantic
+pdfplumber
+python-docx
+python-pptx
+pandas
+openpyxl
 Pillow>=10.0.0
 pytesseract>=0.3.10
 requests
+camelot-py[cv]  # <--- ADDED THIS LINE
+opencv-python-headless # <--- ADDED THIS LINE

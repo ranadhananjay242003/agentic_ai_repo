@@ -1,12 +1,11 @@
 "use client";
 import { useState, useRef, useEffect } from 'react';
 import { Send, Upload, ShieldAlert, Check, X, FileText, Loader2 } from 'lucide-react';
-import { UserButton, useUser } from "@clerk/nextjs"; // 1. Import Clerk Hooks
+import { UserButton, useUser } from "@clerk/nextjs"; 
 
 export default function Home() {
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
 
-  // 2. Get Real User Data
   const { user, isLoaded } = useUser();
 
   const [activeTab, setActiveTab] = useState<'chat' | 'upload' | 'approvals'>('chat');
@@ -33,7 +32,6 @@ export default function Home() {
   const fetchPendingActions = async () => {
     if (!user) return;
     try {
-      // 3. Send Real User ID in params
       const res = await fetch(`${API_URL}/pending?user_id=${user.id}`);
       if (res.ok) {
         const data = await res.json();
@@ -58,7 +56,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-            user_id: user.id, // 4. Send Real User ID
+            user_id: user.id, 
             query: query 
         })
       });
@@ -70,7 +68,6 @@ export default function Home() {
           content: data.summary, 
           citations: data.citations 
         }]);
-        // Refresh approvals if AI said it created one
         fetchPendingActions();
       } else {
         throw new Error('Backend error');
@@ -88,8 +85,6 @@ export default function Home() {
     const file = e.target.files[0];
     const formData = new FormData();
     formData.append('file', file);
-    // Note: We send user_id, though currently backend might rely on its own logic.
-    // Good for future proofing RBAC.
     formData.append('user_id', user.id); 
 
     setUploadStatus('Uploading...');
@@ -121,7 +116,6 @@ export default function Home() {
         body: JSON.stringify({
           action_id: id,
           approved: approved,
-          // 5. Send Real User Signature (Name or Email)
           user_signature: user.fullName || user.primaryEmailAddress?.emailAddress || user.id
         })
       });
@@ -136,8 +130,53 @@ export default function Home() {
       alert("Network error.");
     }
   };
+  
+  // --- NEW: Custom Component to Render Code/Results ---
+  const renderMessageContent = (content: string) => {
+    // Check for the unique markers from our Rust code
+    if (content.startsWith('🤖 **I wrote and executed a Python script')) {
+        
+        // Split by the triple backticks (```)
+        const code_parts = content.split('```');
+        
+        // Part 0: The intro text
+        const introText = code_parts[0].replace('**', '').replace('**', '').trim();
+        
+        // Part 1: The code block (if it exists)
+        const codeBlock = code_parts.length > 1 ? code_parts[1].trim() : null;
+        
+        // Part 2: The result (if it exists)
+        const resultText = code_parts.length > 2 ? code_parts[2].replace('Result:', '').trim() : null;
 
-  // 6. Show Loading State while Clerk connects
+        return (
+            <>
+                <p className="leading-relaxed font-bold mb-2">🤖 {introText}</p>
+                
+                {/* Render the Code Block */}
+                {codeBlock && (
+                    <pre className="p-2 my-2 bg-slate-950/70 text-green-400 text-xs rounded-lg overflow-x-auto border border-slate-700">
+                        {codeBlock.replace('python', '').trim()}
+                    </pre>
+                )}
+
+                {/* Render the Result */}
+                {resultText && (
+                    <div className="mt-2 pt-2 border-t border-slate-700">
+                        <p className="text-slate-400 font-semibold mb-1 text-sm">Final Result:</p>
+                        <p className="text-lg font-mono text-purple-300 bg-slate-900 px-3 py-1 rounded-md inline-block break-all">
+                            {resultText}
+                        </p>
+                    </div>
+                )}
+            </>
+        );
+    }
+    
+    // Default rendering for normal text/RAG answers
+    return <p className="leading-relaxed">{content}</p>;
+  }
+
+
   if (!isLoaded) {
     return (
         <div className="flex min-h-screen bg-slate-950 items-center justify-center text-slate-400">
@@ -146,7 +185,6 @@ export default function Home() {
     );
   }
 
-  // 7. If not signed in, Clerk middleware will redirect, but we render nothing just in case
   if (!user) return null;
 
   return (
@@ -197,7 +235,8 @@ export default function Home() {
               {chatHistory.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[80%] p-4 rounded-xl ${msg.role === 'user' ? 'bg-blue-600' : 'bg-slate-800 border border-slate-700'}`}>
-                    <p className="leading-relaxed">{msg.content}</p>
+                    {renderMessageContent(msg.content)}
+                    
                     {/* Citations Block */}
                     {msg.citations && msg.citations.length > 0 && (
                       <div className="mt-4 pt-4 border-t border-slate-700 text-sm">
@@ -221,7 +260,7 @@ export default function Home() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                placeholder="Ex: Please create a ticket for the login failure..."
+                placeholder="Ex: Calculate the sum of the first 50 fibonacci numbers."
                 className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition"
               />
               <button onClick={handleSearch} className="bg-blue-600 hover:bg-blue-500 px-6 rounded-lg font-medium transition">Send</button>

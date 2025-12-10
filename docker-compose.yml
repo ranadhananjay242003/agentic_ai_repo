@@ -101,6 +101,7 @@ services:
       - JIRA_USER=${JIRA_USER}
       - JIRA_TOKEN=${JIRA_TOKEN}
       - JIRA_PROJECT_KEY=${JIRA_PROJECT_KEY}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
 
     depends_on:
       postgres:
@@ -128,6 +129,16 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1 
     depends_on:
       - orchestrator
+    networks:
+      - agentic-network
+
+  code-interpreter:
+    build:
+      context: ./services/code-interpreter
+      dockerfile: Dockerfile
+    container_name: agentic-code-interpreter
+    ports:
+      - "8004:8004"
     networks:
       - agentic-network
 
