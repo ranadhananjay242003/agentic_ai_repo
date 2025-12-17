@@ -1,6 +1,6 @@
 """
 Document Ingestion Service
-Extracts text and metadata from various document formats (with Advanced Table Extraction)
+Extracts text and metadata from various document formats (Robust Version)
 """
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel
@@ -14,11 +14,9 @@ import base64
 import json
 from pathlib import Path
 
-# --- NEW TABLE IMPORTS ---
+# --- IMPORTS ---
 import camelot
 import pandas as pd
-
-# --- EXISTING IMPORTS ---
 import pytesseract
 from PIL import Image
 
@@ -32,63 +30,126 @@ from chunker import PassageChunker
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Document Ingestion Service", version="1.6.0")
+app = FastAPI(title="Document Ingestion Service", version="1.7.0")
 
-# --- NEW TABLE EXTRACTOR CLASS ---
+# --- ROBUST EXTRACTOR CLASSES ---
+
+class ImageExtractor:
+    """
+    Uses Tesseract to read text, then Llama 3.3 (Text) to clean/format it.
+    This avoids Vision API dependency issues.
+    """
+    def extract(self, content: bytes, filename: str) -> tuple[str, dict]:
+        text_output = ""
+        
+        # 1. Run Tesseract OCR (Reliable text extraction)
+        try:
+            image = Image.open(io.BytesIO(content))
+            raw_ocr_text = pytesseract.image_to_string(image)
+            logger.info(f"Raw OCR Output length: {len(raw_ocr_text)}")
+        except Exception as e:
+            logger.error(f"OCR Failed: {e}")
+            return "[Image OCR Failed]", {"format": "image", "error": str(e)}
+
+        if not raw_ocr_text.strip():
+            return "[No text found in image]", {"format": "image"}
+
+        # 2. Use Llama 3.3 to Structure the Data
+        cleaned_text = self.clean_ocr_with_llm(raw_ocr_text)
+        
+        if cleaned_text:
+            text_output = f"--- SMART OCR ANALYSIS ---\n{cleaned_text}\n\n--- RAW SCAN ---\n{raw_ocr_text}"
+        else:
+            text_output = f"--- RAW SCAN ---\n{raw_ocr_text}"
+
+        metadata = {
+            "format": "image",
+            "method": "ocr_plus_llm",
+            "filename": filename
+        }
+        return text_output, metadata
+
+    def clean_ocr_with_llm(self, messy_text: str) -> str:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key: 
+            logger.warning("GROQ_API_KEY missing, skipping cleanup")
+            return ""
+
+        try:
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Using the stable Text model
+            payload = {
+                "model": "llama-3.3-70b-versatile", 
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a Data Formatting Assistant. I will provide raw, messy text scanned from an image/chart. Your job is to format it cleanly. If it's a chart, list data as 'Label: Value'. If it's text, correct typos. Output ONLY the cleaned text."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Raw Text:\n{messy_text}"
+                    }
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1000
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                return response.json()['choices'][0]['message']['content']
+            else:
+                logger.error(f"LLM Cleanup Error: {response.text}")
+                return ""
+        except Exception as e:
+            logger.error(f"LLM Cleanup Failed: {e}")
+            return ""
+
+class AudioExtractor:
+    def extract(self, content: bytes, filename: str) -> tuple[str, dict]:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key: raise Exception("GROQ_API_KEY not found in environment")
+        
+        try:
+            url = "https://api.groq.com/openai/v1/audio/transcriptions"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            # Filename is required for Groq to know file type
+            files = {"file": (filename, content)} 
+            data = {"model": "whisper-large-v3"}
+            
+            logger.info(f"Sending audio {filename} to Whisper...")
+            response = requests.post(url, headers=headers, files=files, data=data)
+            
+            if response.status_code != 200:
+                raise Exception(f"Groq API Error: {response.status_code} - {response.text}")
+            
+            return response.json().get("text", ""), {"format": "audio", "model": "whisper"}
+        except Exception as e:
+            raise Exception(f"Transcription failed: {str(e)}")
+
 class PDFTableExtractor:
     def extract_tables_to_text(self, pdf_bytes: bytes) -> str:
-        """Extracts tables from PDF bytes and returns them as a structured string."""
         try:
-            # Save bytes to a temporary file for camelot
             temp_path = Path("/tmp") / f"temp_{os.getpid()}.pdf"
-            with open(temp_path, "wb") as f:
-                f.write(pdf_bytes)
-            
-            logger.info(f"Extracting tables from {temp_path}...")
-            # Use 'lattice' method for structured tables
+            with open(temp_path, "wb") as f: f.write(pdf_bytes)
             tables = camelot.read_pdf(str(temp_path), flavor='lattice', pages='all')
-            
             structured_text = []
             if tables.n > 0:
                 for i, table in enumerate(tables):
                     df: pd.DataFrame = table.df
-                    
-                    # Convert DataFrame to a clean, searchable markdown-like text
                     table_markdown = df.to_markdown(index=False)
-                    
                     structured_text.append(f"\n--- TABLE {i+1} START ---\n{table_markdown}\n--- TABLE {i+1} END ---\n")
-                
-                logger.info(f"Successfully extracted {tables.n} tables.")
                 return "\n".join(structured_text)
-            
             return ""
-
         except Exception as e:
             logger.error(f"Camelot Table Extraction Failed: {e}")
-            return f"\n--- TABLE EXTRACTION FAILED: {str(e)} ---\n"
+            return ""
         finally:
-            if temp_path.exists():
-                os.remove(temp_path)
-
-# --- EXISTING EXTRACTORS (Truncated for brevity, assuming you merge this in) ---
-# ... (ImageExtractor, AudioExtractor classes remain the same) ...
-
-class ImageExtractor:
-    # (Content remains the same as previous step's ImageExtractor)
-    def extract(self, content: bytes, filename: str) -> tuple[str, dict]:
-        # ... (Same logic as before, but ensure you include ALL dependencies) ...
-        # Simplified for demonstration:
-        try:
-            image = Image.open(io.BytesIO(content))
-            ocr_text = pytesseract.image_to_string(image)
-            return ocr_text, {"format": "image"}
-        except:
-            return "[Image extraction failed]", {"format": "image"}
-
-class AudioExtractor:
-    # (Content remains the same as previous step's AudioExtractor)
-    def extract(self, content: bytes, filename: str) -> tuple[str, dict]:
-        return "Audio transcription placeholder", {"format": "audio"}
+            if temp_path.exists(): os.remove(temp_path)
 
 # Initialize extractors
 pdf_extractor = PDFExtractor()
@@ -97,7 +158,7 @@ pptx_extractor = PPTXExtractor()
 csv_extractor = CSVExtractor()
 image_extractor = ImageExtractor()
 audio_extractor = AudioExtractor() 
-table_extractor = PDFTableExtractor() # NEW INITIALIZATION
+table_extractor = PDFTableExtractor()
 
 chunker = PassageChunker(chunk_size=1024, overlap=50)
 
@@ -123,14 +184,10 @@ async def extract_document(file: UploadFile = File(...)):
         metadata = {}
 
         if file.content_type == "application/pdf" or file.filename.endswith(".pdf"):
-            # --- MODIFIED: Extract text AND tables ---
             base_text, metadata = pdf_extractor.extract(content)
             table_text = table_extractor.extract_tables_to_text(content)
-            
-            # Combine text and tables
             text = f"{base_text}\n\n{table_text}"
             metadata["has_tables"] = bool(table_text)
-        
         elif file.filename.endswith((".docx", ".doc")):
             text, metadata = docx_extractor.extract(content)
         elif file.filename.endswith(".csv"):
@@ -145,8 +202,8 @@ async def extract_document(file: UploadFile = File(...)):
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.content_type}")
         
-        # ... (rest of the code for chunking and returning the response) ...
         if not text or not text.strip(): text = "[No text found]"
+
         passages_data = chunker.chunk(text, metadata)
         passages = [Passage(passage_id=p["passage_id"], text=p["text"], page=p.get("page"), char_start=p["char_start"], char_end=p["char_end"], metadata=p.get("metadata", {})) for p in passages_data]
         
@@ -154,6 +211,8 @@ async def extract_document(file: UploadFile = File(...)):
         
     except Exception as e:
         logger.error(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Extraction failed: {str(e)}")
 
 if __name__ == "__main__":

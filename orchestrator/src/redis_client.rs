@@ -1,4 +1,5 @@
-use redis::{aio::ConnectionManager, AsyncCommands, Client};
+use redis::AsyncCommands;
+use redis::aio::ConnectionManager;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 
@@ -9,14 +10,14 @@ pub struct RedisClient {
 
 impl RedisClient {
     pub async fn new(redis_url: &str) -> Result<Self> {
-        let client = Client::open(redis_url)?;
-        let connection = ConnectionManager::new(client).await?;
-        
+        let client = redis::Client::open(redis_url)?;
+        let connection = client.get_tokio_connection_manager().await?;
         Ok(Self { connection })
     }
 
     pub async fn publish(&mut self, channel: &str, message: &str) -> Result<()> {
-        self.connection.publish(channel, message).await?;
+        // FIX: Added <_, _, ()> to specify return type
+        self.connection.publish::<_, _, ()>(channel, message).await?;
         Ok(())
     }
 
@@ -27,22 +28,22 @@ impl RedisClient {
         expiry_secs: usize,
     ) -> Result<()> {
         let json = serde_json::to_string(value)?;
-        self.connection
-            .set_ex(key, json, expiry_secs as u64)
-            .await?;
+        // FIX: Added <_, _, ()>
+        self.connection.set_ex::<_, _, ()>(key, json, expiry_secs as u64).await?;
         Ok(())
     }
 
     pub async fn get<T: for<'de> Deserialize<'de>>(&mut self, key: &str) -> Result<Option<T>> {
-        let json: Option<String> = self.connection.get(key).await?;
-        match json {
-            Some(s) => Ok(Some(serde_json::from_str(&s)?)),
+        let result: Option<String> = self.connection.get(key).await?;
+        match result {
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
             None => Ok(None),
         }
     }
 
     pub async fn delete(&mut self, key: &str) -> Result<()> {
-        self.connection.del(key).await?;
+        // FIX: Added <_, ()>
+        self.connection.del::<_, ()>(key).await?;
         Ok(())
     }
 }

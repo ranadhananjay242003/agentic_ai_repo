@@ -38,13 +38,18 @@ services:
       context: ./services/ingestion
       dockerfile: Dockerfile
     container_name: agentic-ingestion
+    # Force uvicorn to run with reload
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
     ports:
       - "8001:8001"
+    # CRITICAL FIX: Load secrets from .env file
+    env_file:
+      - .env
     environment:
       - LOG_LEVEL=info
-      - GROQ_API_KEY=${GROQ_API_KEY}
     volumes:
       - ./data/uploads:/app/uploads
+      - ./services/ingestion:/app
     depends_on:
       - postgres
       - redis
@@ -84,6 +89,9 @@ services:
     container_name: agentic-orchestrator
     ports:
       - "8080:8080"
+    # CRITICAL FIX: Load secrets from .env file
+    env_file:
+      - .env
     environment:
       - PORT=8080
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/agentic_ai
@@ -93,16 +101,17 @@ services:
       - VECTOR_DB_SERVICE_URL=http://vector-db-service:8003
       - LOG_LEVEL=info
       - JWT_SECRET=dev-secret-change-in-production
+      # Note: Since we use env_file, we don't strictly need to list them here 
+      # unless we are renaming them, but keeping them doesn't hurt.
       - GROQ_API_KEY=${GROQ_API_KEY}
-      - SMTP_HOST=smtp.gmail.com  
-      - SMTP_USER=dhananjayrana24@gmail.com
-      - SMTP_PASS=gbegxsgfayeopwkb
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASS=${SMTP_PASS}
       - JIRA_DOMAIN=${JIRA_DOMAIN}
       - JIRA_USER=${JIRA_USER}
       - JIRA_TOKEN=${JIRA_TOKEN}
       - JIRA_PROJECT_KEY=${JIRA_PROJECT_KEY}
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
-
     depends_on:
       postgres:
         condition: service_healthy
@@ -121,12 +130,24 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Pass the keys from your .env file into the Docker build
+        - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+        - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
     container_name: agentic-frontend
     ports:
       - "3000:3000"
+    env_file:
+      - .env
     environment:
-      # Use localhost here because this env var is read by the BROWSER, not the container
-      - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1 
+      - PORT=3000
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1
+      - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
+      - NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+      - NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
+      - NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/
+      - NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/
     depends_on:
       - orchestrator
     networks:

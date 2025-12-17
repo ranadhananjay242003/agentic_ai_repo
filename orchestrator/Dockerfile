@@ -1,61 +1,49 @@
-# Multi-stage build for Rust orchestrator
-
-# Stage 1: Build (use recent Rust for edition 2024 support)
+# Stage 1: Build
 FROM rust:latest as builder
 
 WORKDIR /app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Create a dummy project to cache dependencies
+RUN mkdir -p orchestrator/src
+RUN echo "fn main() {}" > orchestrator/src/main.rs
 
-# Copy workspace manifests
-COPY Cargo.toml ./
+COPY Cargo.toml .
+COPY Cargo.lock .
 COPY orchestrator/Cargo.toml orchestrator/
 
-# Create dummy main to cache dependencies
-RUN mkdir -p orchestrator/src && \
-    echo "fn main() {}" > orchestrator/src/main.rs
-
-# Build dependencies only
+# Build dependencies
 RUN cargo build --release --manifest-path orchestrator/Cargo.toml
 
-# Remove dummy main
+# Remove dummy file
 RUN rm orchestrator/src/main.rs
 
 # Copy actual source code
 COPY orchestrator/src orchestrator/src
+# Copy migrations if they exist
 COPY orchestrator/migrations orchestrator/migrations
 
-# Build the application (clean to avoid stale dummy build artifacts)
-RUN cargo clean && cargo build --release --manifest-path orchestrator/Cargo.toml
+# Build the actual application
+# Use 'touch' to force cargo to rebuild the main file
+RUN touch orchestrator/src/main.rs
+RUN cargo build --release --manifest-path orchestrator/Cargo.toml
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install runtime dependencies (curl needed for healthcheck)
+# Install runtime dependencies (OpenSSL, ca-certificates)
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary from builder
+# Copy the binary from the builder stage
 COPY --from=builder /app/target/release/orchestrator /app/orchestrator
+COPY --from=builder /app/orchestrator/migrations /app/migrations
 
-# Copy migrations
-COPY orchestrator/migrations /app/migrations
-
-# Expose port
+# Expose the port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Run the application
-CMD ["/app/orchestrator"]
+# Run the binary
+CMD ["./orchestrator"]

@@ -43,7 +43,7 @@ pub async fn handle_query(
         return Ok(warp::reply::json(&QueryResponse { request_id, summary: format!("✅ Drafted Email Alert (Action ID: {})", action_id), citations: vec![], pending_actions: pending_action_ids }));
     }
     
-    // --- PATH B: DECISION LOGIC (Slack) --- <--- NEW SLACK BLOCK
+    // --- PATH B: DECISION LOGIC (Slack) ---
     else if q_lower.contains("slack") || q_lower.contains("post to channel") {
         let action_id = Uuid::new_v4();
         let payload = json!({ 
@@ -51,29 +51,20 @@ pub async fn handle_query(
             "channel": "#general",
             "priority": "high" 
         });
-        
         let _ = sqlx::query("INSERT INTO pending_actions (id, request_id, action_type, target_service, payload, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())")
-            .bind(action_id).bind(request_id).bind("SLACK_ALERT").bind("slack").bind(payload).bind("pending")
-            .execute(&db_pool).await;
-            
+            .bind(action_id).bind(request_id).bind("SLACK_ALERT").bind("slack").bind(payload).bind("pending").execute(&db_pool).await;
         pending_action_ids.push(action_id);
-        
-        return Ok(warp::reply::json(&QueryResponse {
-            request_id,
-            summary: format!("✅ I have drafted a Slack message. Check the 'Pending Actions' tab to approve and post it."),
-            citations: vec![],
-            pending_actions: pending_action_ids,
-        }));
+        return Ok(warp::reply::json(&QueryResponse { request_id, summary: format!("✅ Drafted Slack message."), citations: vec![], pending_actions: pending_action_ids }));
     }
 
-    // --- PATH C: SANDBOXED CODE EXECUTION (Math/Logic) ---
+    // --- PATH C: SANDBOXED CODE EXECUTION ---
     else if q_lower.contains("calculate") || q_lower.contains("solve") || q_lower.contains("math") {
         let groq_api_key = env::var("GROQ_API_KEY").unwrap_or_default();
         if !groq_api_key.is_empty() {
             let code_prompt = json!({
                 "model": "llama-3.3-70b-versatile",
                 "messages": [
-                    { "role": "system", "content": "You are a Python Coding Assistant. Output ONLY valid Python code to solve the user's problem. Use 'print()' to output the final answer." },
+                    { "role": "system", "content": "You are a Python Coding Assistant. Output ONLY valid Python code. Use 'print()' to output answer." },
                     { "role": "user", "content": request.query }
                 ]
             });
@@ -86,7 +77,6 @@ pub async fn handle_query(
                             if let Ok(exec_res) = client.post(interpreter_url).json(&json!({ "code": clean_code })).send().await {
                                     if let Ok(exec_data) = exec_res.json::<Value>().await {
                                         let output = exec_data["output"].as_str().unwrap_or("No output").to_string();
-                                        // Final output string for frontend
                                         let summary = format!("🤖 **I wrote and executed a Python script to calculate this:**\n\nCode:\n```python\n{}\n```\n\nResult:\n```\n{}\n```", clean_code, output);
                                         return Ok(warp::reply::json(&QueryResponse { request_id, summary, citations: vec![], pending_actions: vec![] }));
                                     }
@@ -97,7 +87,7 @@ pub async fn handle_query(
         }
     }
 
-    // --- PATH D: STANDARD RAG (Fallback) ---
+    // --- PATH D: STANDARD RAG (Enhanced with Filenames) ---
     let embedding_url = env::var("EMBEDDING_SERVICE_URL").unwrap_or("http://embedding-service:8002".to_string());
     let vector_url = env::var("VECTOR_DB_SERVICE_URL").unwrap_or("http://vector-db-service:8003".to_string());
     let mut context_text = String::new();
@@ -108,15 +98,21 @@ pub async fn handle_query(
             if let Some(vecs) = json_data["embeddings"].as_array() {
                 if let Some(first_vec) = vecs.get(0).and_then(|v| v.as_array()) {
                     let vector: Vec<f64> = first_vec.iter().map(|n| n.as_f64().unwrap_or(0.0)).collect();
-                    let search_payload = json!({ "query_vector": vector, "query_text": request.query, "top_k": 3, "hybrid": true, "user_id": request.user_id });
+                    let search_payload = json!({ "query_vector": vector, "query_text": request.query, "top_k": 5, "hybrid": true, "user_id": request.user_id });
+                    
                     if let Ok(s_resp) = client.post(format!("{}/search/hybrid", vector_url)).json(&search_payload).send().await {
                         if let Ok(results) = s_resp.json::<Value>().await {
                             if let Some(matches) = results["results"].as_array() {
                                 for m in matches {
                                     let text = m["metadata"]["text"].as_str().unwrap_or("").to_string();
+                                    // EXTRACT FILENAME HERE
+                                    let filename = m["metadata"]["filename"].as_str().unwrap_or("Unknown File");
                                     let score = m["score"].as_f64().unwrap_or(0.0) as f32;
+                                    
                                     if !text.is_empty() {
-                                        context_text.push_str(&format!("- {}\n", text));
+                                        // ADD FILENAME TO CONTEXT FOR AI
+                                        context_text.push_str(&format!("- [Source: {}] {}\n", filename, text));
+                                        
                                         citations.push(Citation { doc_id: Uuid::new_v4(), passage_id: Uuid::new_v4(), page: m["metadata"]["page"].as_i64().map(|v| v as i32), text: text.chars().take(150).collect(), relevance_score: score });
                                     }
                                 }
@@ -137,7 +133,7 @@ pub async fn handle_query(
         let llm_body = json!({
             "model": "llama-3.3-70b-versatile",
             "messages": [
-                { "role": "system", "content": "You are a helpful Enterprise AI. Use the provided Context to answer." },
+                { "role": "system", "content": "You are a helpful Enterprise AI. Use the provided Context to answer. The context includes the filename. If the user asks about an 'audio file', look at the context sources." },
                 { "role": "user", "content": format!("Context:\n{}\n\nQuestion: {}", context_text, request.query) }
             ]
         });
