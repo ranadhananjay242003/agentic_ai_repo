@@ -1,33 +1,42 @@
 "use client";
 import { useState, useRef, useEffect } from 'react';
-import { Send, Upload, ShieldAlert, Check, X, FileText, Loader2 } from 'lucide-react';
+import { 
+  Send, Upload, ShieldAlert, Check, X, 
+  FileText, Loader2, Code, Zap, Plus, 
+  MessageSquare, LayoutDashboard 
+} from 'lucide-react';
 import { UserButton, useUser } from "@clerk/nextjs"; 
 
 export default function Home() {
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
-
   const { user, isLoaded } = useUser();
-
-  const [activeTab, setActiveTab] = useState<'chat' | 'upload' | 'approvals'>('chat');
   
-  // --- CHAT STATE ---
+  const [activeTab, setActiveTab] = useState<'chat' | 'upload' | 'approvals'>('chat');
   const [query, setQuery] = useState('');
   const [chatHistory, setChatHistory] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-
-  // --- UPLOAD STATE ---
   const [uploadStatus, setUploadStatus] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // --- APPROVALS STATE ---
   const [pendingActions, setPendingActions] = useState<any[]>([]);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
 
-  // Fetch actions ONLY when user is loaded
+  // Auto-scroll to bottom
   useEffect(() => {
-    if (isLoaded && user) {
-      fetchPendingActions();
+    if (chatScrollRef.current) {
+        chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
+  }, [chatHistory, loading]);
+
+  useEffect(() => {
+    if (isLoaded && user) { fetchPendingActions(); }
   }, [activeTab, isLoaded, user]);
+
+  // --- NEW FEATURE: Clear Chat ---
+  const handleNewChat = () => {
+    setChatHistory([]);
+    setQuery('');
+    setActiveTab('chat');
+  };
 
   const fetchPendingActions = async () => {
     if (!user) return;
@@ -35,51 +44,34 @@ export default function Home() {
       const res = await fetch(`${API_URL}/pending?user_id=${user.id}`);
       if (res.ok) {
         const data = await res.json();
-        const actions = Array.isArray(data) ? data : data.actions || [];
-        setPendingActions(actions);
+        setPendingActions(Array.isArray(data) ? data : data.actions || []);
       }
-    } catch (err) {
-      console.error("Failed to fetch pending actions", err);
-    }
+    } catch (err) { /* silent fail */ }
   };
-
-  // 1. HANDLE CHAT
+  
   const handleSearch = async () => {
     if (!query || !user) return;
     setLoading(true);
-    
     const newHistory = [...chatHistory, { role: 'user', content: query }];
     setChatHistory(newHistory);
+    setQuery(''); // Clear input immediately
     
     try {
       const res = await fetch(`${API_URL}/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-            user_id: user.id, 
-            query: query 
-        })
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: user.id, query: query })
       });
-      
       if (res.ok) {
         const data = await res.json();
-        setChatHistory([...newHistory, { 
-          role: 'ai', 
-          content: data.summary, 
-          citations: data.citations 
-        }]);
+        setChatHistory([...newHistory, { role: 'ai', content: data.summary, citations: data.citations }]);
         fetchPendingActions();
-      } else {
-        throw new Error('Backend error');
-      }
+      } else { throw new Error('Backend error'); }
     } catch (err) {
       setChatHistory([...newHistory, { role: 'ai', content: "Error: Could not connect to Orchestrator." }]);
     }
     setLoading(false);
-    setQuery('');
   };
 
-  // 2. HANDLE UPLOAD
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.[0] || !user) return;
     const file = e.target.files[0];
@@ -90,251 +82,273 @@ export default function Home() {
     setUploadStatus('Uploading...');
 
     try {
-      const res = await fetch(`${API_URL}/ingest`, {
-        method: 'POST',
-        body: formData,
-      });
-      
+      const res = await fetch(`${API_URL}/ingest`, { method: 'POST', body: formData });
       if (res.ok) {
         const data = await res.json();
         setUploadStatus(`Success! Document ID: ${data.document_id}`);
-      } else {
-        setUploadStatus('Upload failed (Server Error).');
-      }
-    } catch (err) {
-      setUploadStatus('Upload failed (Network Error).');
-    }
+      } else { setUploadStatus('Upload failed (Server Error).'); }
+    } catch (err) { setUploadStatus('Upload failed (Network Error).'); }
   };
-
-  // 3. HANDLE APPROVALS
+  
   const handleApprove = async (id: string, approved: boolean) => {
     if (!user) return;
     try {
       const res = await fetch(`${API_URL}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action_id: id,
-          approved: approved,
-          user_signature: user.fullName || user.primaryEmailAddress?.emailAddress || user.id
-        })
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action_id: id, approved: approved, user_signature: user.fullName || user.primaryEmailAddress?.emailAddress || user.id })
       });
-
-      if (res.ok) {
-        setPendingActions(pendingActions.filter(a => a.id !== id));
-      } else {
-        alert("Error sending approval to backend.");
-      }
-    } catch (err) {
-      console.error("Approval failed", err);
-      alert("Network error.");
-    }
+      if (res.ok) { setPendingActions(pendingActions.filter(a => a.id !== id)); } 
+    } catch (err) { console.error("Approval failed", err); }
   };
   
-  // --- NEW: Custom Component to Render Code/Results ---
+  // Custom Renderer for Code Execution
   const renderMessageContent = (content: string) => {
-    // Check for the unique markers from our Rust code
     if (content.startsWith('🤖 **I wrote and executed a Python script')) {
-        
-        // Split by the triple backticks (```)
         const code_parts = content.split('```');
-        
-        // Part 0: The intro text
         const introText = code_parts[0].replace('**', '').replace('**', '').trim();
-        
-        // Part 1: The code block (if it exists)
         const codeBlock = code_parts.length > 1 ? code_parts[1].trim() : null;
-        
-        // Part 2: The result (if it exists)
         const resultText = code_parts.length > 2 ? code_parts[2].replace('Result:', '').trim() : null;
 
         return (
-            <>
-                <p className="leading-relaxed font-bold mb-2">🤖 {introText}</p>
-                
-                {/* Render the Code Block */}
+            <div className="w-full">
+                <p className="leading-relaxed font-semibold mb-3 flex items-center text-purple-400">
+                    <Code size={18} className='mr-2'/> {introText}
+                </p>
                 {codeBlock && (
-                    <pre className="p-2 my-2 bg-slate-950/70 text-green-400 text-xs rounded-lg overflow-x-auto border border-slate-700">
-                        {codeBlock.replace('python', '').trim()}
-                    </pre>
-                )}
-
-                {/* Render the Result */}
-                {resultText && (
-                    <div className="mt-2 pt-2 border-t border-slate-700">
-                        <p className="text-slate-400 font-semibold mb-1 text-sm">Final Result:</p>
-                        <p className="text-lg font-mono text-purple-300 bg-slate-900 px-3 py-1 rounded-md inline-block break-all">
-                            {resultText}
-                        </p>
+                    <div className="rounded-md overflow-hidden border border-zinc-700 bg-[#0d1117]">
+                        <div className="bg-zinc-800 px-3 py-1 text-xs text-zinc-400 font-mono border-b border-zinc-700">Python</div>
+                        <pre className="p-3 text-sm font-mono text-gray-300 overflow-x-auto custom-scrollbar">
+                            {codeBlock.replace('python', '').trim()}
+                        </pre>
                     </div>
                 )}
-            </>
+                {resultText && (
+                    <div className="mt-3 flex items-start gap-2">
+                        <Zap size={16} className='text-yellow-400 mt-1'/>
+                        <div>
+                            <p className="text-xs text-zinc-500 font-bold uppercase tracking-wider mb-1">Result</p>
+                            <p className="text-md font-mono text-white bg-green-900/30 px-3 py-2 rounded-md border border-green-700/50">
+                                {resultText}
+                            </p>
+                        </div>
+                    </div>
+                )}
+            </div>
         );
     }
-    
-    // Default rendering for normal text/RAG answers
-    return <p className="leading-relaxed">{content}</p>;
+    return <p className="leading-relaxed whitespace-pre-wrap">{content}</p>;
   }
 
-
-  if (!isLoaded) {
-    return (
-        <div className="flex min-h-screen bg-slate-950 items-center justify-center text-slate-400">
-            <Loader2 className="animate-spin mr-2" /> Loading User Data...
-        </div>
-    );
-  }
-
+  if (!isLoaded) { return (<div className="flex min-h-screen bg-black items-center justify-center text-zinc-500"><Loader2 className="animate-spin mr-2" /> Initializing...</div>); }
   if (!user) return null;
 
   return (
-    <main className="flex min-h-screen bg-slate-950 text-slate-100 font-sans">
+    <main className="flex h-screen bg-black text-zinc-100 font-sans overflow-hidden">
       
       {/* SIDEBAR */}
-      <div className="w-64 border-r border-slate-800 p-6 flex flex-col gap-6">
+      <div className="w-72 bg-zinc-900 border-r border-zinc-800 flex flex-col shadow-xl z-20">
         
-        {/* USER PROFILE SECTION */}
-        <div className="flex items-center gap-3 pb-4 border-b border-slate-800">
-            <UserButton afterSignOutUrl="/"/>
-            <div className="overflow-hidden">
-                <h1 className="text-sm font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent truncate">
-                Agentic AI
-                </h1>
-                <p className="text-xs text-slate-500 truncate" title={user.primaryEmailAddress?.emailAddress}>
-                    {user.fullName || 'User'}
-                </p>
+        {/* User Header */}
+        <div className="p-4 border-b border-zinc-800">
+            <div className="flex items-center gap-3">
+                <UserButton afterSignOutUrl="/" appearance={{ elements: { userButtonAvatarBox: "w-9 h-9" } }}/>
+                <div className="overflow-hidden">
+                    <h1 className="text-md font-bold text-white tracking-tight">Nexus</h1>
+                    <p className="text-xs text-zinc-500 truncate">{user.fullName}</p>
+                </div>
             </div>
         </div>
 
-        <nav className="flex flex-col gap-2">
-          <button onClick={() => setActiveTab('chat')} className={`flex items-center gap-3 p-3 rounded-lg text-sm font-medium transition ${activeTab === 'chat' ? 'bg-blue-600 text-white' : 'hover:bg-slate-900 text-slate-400'}`}>
-            <Send size={18} /> Knowledge Chat
-          </button>
-          <button onClick={() => setActiveTab('upload')} className={`flex items-center gap-3 p-3 rounded-lg text-sm font-medium transition ${activeTab === 'upload' ? 'bg-blue-600 text-white' : 'hover:bg-slate-900 text-slate-400'}`}>
-            <Upload size={18} /> Ingest Data
-          </button>
-          <button onClick={() => setActiveTab('approvals')} className={`flex items-center gap-3 p-3 rounded-lg text-sm font-medium transition ${activeTab === 'approvals' ? 'bg-blue-600 text-white' : 'hover:bg-slate-900 text-slate-400'}`}>
-            <ShieldAlert size={18} /> Pending Actions
-            {pendingActions.length > 0 && <span className="ml-auto bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{pendingActions.length}</span>}
-          </button>
+        {/* New Chat Button */}
+        <div className="p-4 pb-2">
+            <button 
+                onClick={handleNewChat}
+                className="flex items-center justify-center gap-2 w-full bg-white text-black hover:bg-zinc-200 transition-colors py-2.5 rounded-lg font-semibold text-sm shadow-sm"
+            >
+                <Plus size={18} /> New Chat
+            </button>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 overflow-y-auto px-2 py-4 space-y-1">
+            <div className="text-xs font-semibold text-zinc-500 px-3 mb-2 uppercase tracking-wider">Menu</div>
+            
+            <button onClick={() => setActiveTab('chat')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all ${activeTab === 'chat' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}>
+                <MessageSquare size={18} /> Knowledge Chat
+            </button>
+            <button onClick={() => setActiveTab('upload')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all ${activeTab === 'upload' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}>
+                <Upload size={18} /> Ingest Data
+            </button>
+            <button onClick={() => setActiveTab('approvals')} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-all ${activeTab === 'approvals' ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'}`}>
+                <div className="relative">
+                    <ShieldAlert size={18} />
+                    {pendingActions.length > 0 && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse"></span>}
+                </div>
+                Pending Actions
+                {pendingActions.length > 0 && <span className="ml-auto text-xs bg-red-500/10 text-red-400 px-2 py-0.5 rounded-full border border-red-500/20">{pendingActions.length}</span>}
+            </button>
         </nav>
+
+        <div className="p-4 border-t border-zinc-800 text-xs text-zinc-600 text-center">
+            v1.0.0 • Production Ready
+        </div>
       </div>
 
-      {/* MAIN CONTENT */}
-      <div className="flex-1 p-8 overflow-y-auto">
+      {/* MAIN AREA */}
+      <div className="flex-1 flex flex-col relative bg-black">
         
-        {/* VIEW: CHAT */}
+        {/* CHAT VIEW */}
         {activeTab === 'chat' && (
-          <div className="max-w-4xl mx-auto flex flex-col h-[90vh]">
-            <div className="flex-1 overflow-y-auto mb-6 space-y-6 pr-4">
-              {chatHistory.length === 0 && (
-                <div className="text-center text-slate-500 mt-20">
-                  <p className="text-lg">Welcome back, {user.firstName}. <br/>Ask me anything about your documents.</p>
+          <>
+            <div className="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth" ref={chatScrollRef}>
+              {chatHistory.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4">
+                  <div className="w-16 h-16 bg-zinc-900 rounded-2xl flex items-center justify-center mb-2 border border-zinc-800">
+                    <LayoutDashboard size={32} className="text-zinc-400"/>
+                  </div>
+                  <h3 className="text-xl font-semibold text-white">How can Nexus help you today?</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-lg w-full">
+                    <button onClick={() => setQuery("Calculate the sum of fibonacci numbers")} className="p-3 bg-zinc-900/50 hover:bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-xl text-sm text-left transition text-zinc-300">
+                        🧮 Calculate Fibonacci numbers
+                    </button>
+                    <button onClick={() => setQuery("Create a Jira ticket for system outage")} className="p-3 bg-zinc-900/50 hover:bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-xl text-sm text-left transition text-zinc-300">
+                        🎫 Create a Jira Ticket
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="max-w-3xl mx-auto space-y-6 pb-4">
+                  {chatHistory.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[85%] rounded-2xl p-5 ${
+                          msg.role === 'user' 
+                          ? 'bg-white text-black' 
+                          : 'bg-zinc-900 border border-zinc-800 text-zinc-100'
+                        }`}>
+                        {renderMessageContent(msg.content)}
+                        
+                        {/* Citations */}
+                        {msg.citations && msg.citations.length > 0 && (
+                          <div className="mt-4 pt-3 border-t border-zinc-800/50">
+                            <p className="text-zinc-500 text-xs font-bold uppercase tracking-wider mb-2 flex items-center">
+                                <FileText size={12} className="mr-1"/> References
+                            </p>
+                            <div className="space-y-2">
+                                {msg.citations.map((cite: any, idx: number) => (
+                                <div key={idx} className="bg-black/30 p-2 rounded border border-zinc-800 text-xs text-zinc-400 font-mono">
+                                    <span className="text-zinc-500">Page {cite.page}:</span> "...{cite.text ? cite.text.substring(0, 80) : ''}..."
+                                </div>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {loading && (
+                    <div className="flex justify-start animate-pulse">
+                        <div className="bg-zinc-900 rounded-2xl p-4 flex items-center text-zinc-400 text-sm">
+                            <Loader2 className="animate-spin mr-2 h-4 w-4"/> AI is thinking...
+                        </div>
+                    </div>
+                  )}
                 </div>
               )}
-              {chatHistory.map((msg, i) => (
-                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] p-4 rounded-xl ${msg.role === 'user' ? 'bg-blue-600' : 'bg-slate-800 border border-slate-700'}`}>
-                    {renderMessageContent(msg.content)}
-                    
-                    {/* Citations Block */}
-                    {msg.citations && msg.citations.length > 0 && (
-                      <div className="mt-4 pt-4 border-t border-slate-700 text-sm">
-                        <p className="text-slate-400 font-semibold mb-2 flex items-center gap-2"><FileText size={14}/> Sources:</p>
-                        {msg.citations.map((cite: any, idx: number) => (
-                          <div key={idx} className="bg-slate-900 p-2 rounded mb-1 text-xs text-slate-300">
-                             Page {cite.page}: "...{cite.text ? cite.text.substring(0, 50) : ''}..."
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+            </div>
+
+            {/* Input Area */}
+            <div className="p-4 bg-black border-t border-zinc-900">
+                <div className="max-w-3xl mx-auto relative">
+                    <input 
+                        type="text" 
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                        placeholder="Message Agentic AI..."
+                        className="w-full bg-zinc-900 border border-zinc-800 text-white rounded-full px-6 py-4 pr-12 focus:outline-none focus:ring-2 focus:ring-zinc-700 focus:border-transparent placeholder:text-zinc-600 shadow-lg"
+                    />
+                    <button 
+                        onClick={handleSearch}
+                        disabled={!query}
+                        className="absolute right-2 top-2 p-2 bg-white text-black rounded-full hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <Send size={18} />
+                    </button>
                 </div>
-              ))}
-              {loading && <div className="text-slate-500 flex gap-2"><Loader2 className="animate-spin"/> Thinking...</div>}
+                <div className="text-center text-[10px] text-zinc-600 mt-2">
+                    AI can make mistakes. Please verify important information.
+                </div>
             </div>
-            
-            <div className="flex gap-4">
-              <input 
-                type="text" 
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                placeholder="Ex: Calculate the sum of the first 50 fibonacci numbers."
-                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition"
-              />
-              <button onClick={handleSearch} className="bg-blue-600 hover:bg-blue-500 px-6 rounded-lg font-medium transition">Send</button>
-            </div>
-          </div>
+          </>
         )}
 
-        {/* VIEW: UPLOAD */}
+        {/* UPLOAD VIEW */}
         {activeTab === 'upload' && (
-          <div className="max-w-2xl mx-auto mt-20 p-10 bg-slate-900 rounded-2xl border border-slate-800 text-center">
-            <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-6">
-              <Upload size={32} className="text-blue-400"/>
+          <div className="flex-1 flex items-center justify-center p-8">
+            <div className="max-w-md w-full bg-zinc-900 p-8 rounded-3xl border border-zinc-800 shadow-2xl text-center">
+                <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <Upload size={32} className="text-white"/>
+                </div>
+                <h2 className="text-2xl font-bold text-white mb-2">Upload Knowledge</h2>
+                <p className="text-zinc-400 text-sm mb-8">Supported formats: PDF, DOCX, CSV, JPG, PNG, MP3, WAV</p>
+                
+                <input type="file" ref={fileInputRef} onChange={handleUpload} className="hidden" />
+                <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-full bg-white text-black font-bold py-3.5 rounded-xl hover:bg-zinc-200 transition-all active:scale-95"
+                >
+                    Choose File
+                </button>
+                
+                {uploadStatus && (
+                    <div className="mt-6 p-3 bg-zinc-950 rounded-lg border border-zinc-800 text-xs text-green-400 font-mono">
+                        {uploadStatus}
+                    </div>
+                )}
             </div>
-            <h2 className="text-2xl font-bold mb-2">Ingest Knowledge</h2>
-            <p className="text-slate-400 mb-8">Upload PDF, DOCX, Images, or Audio files.</p>
-            
-            <input 
-              type="file" 
-              ref={fileInputRef}
-              onChange={handleUpload}
-              className="hidden" 
-            />
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-lg font-medium transition w-full"
-            >
-              Select File
-            </button>
-            
-            {uploadStatus && (
-              <div className="mt-6 p-4 bg-slate-950 rounded border border-slate-800 text-sm text-green-400">
-                {uploadStatus}
-              </div>
-            )}
           </div>
         )}
 
-        {/* VIEW: APPROVALS */}
+        {/* APPROVALS VIEW */}
         {activeTab === 'approvals' && (
-          <div className="max-w-4xl mx-auto">
-            <h2 className="text-2xl font-bold mb-8">Pending Agent Actions</h2>
-            <div className="space-y-4">
-              {pendingActions.length === 0 ? (
-                <div className="text-center p-10 border border-dashed border-slate-800 rounded-xl text-slate-500">
-                  No actions pending approval.
-                </div>
-              ) : ( 
-               pendingActions.map((action) => (
-                <div key={action.id} className="bg-slate-900 border border-slate-800 p-6 rounded-xl flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-3 mb-2">
-                      <span className="bg-purple-500/20 text-purple-300 text-xs px-2 py-1 rounded uppercase font-bold tracking-wider">
-                        {action.action_type || action.type || 'ACTION'}
-                      </span>
-                      {(action.payload?.confidence || action.confidence) && (
-                        <span className="text-slate-500 text-sm">
-                          Confidence: {((action.payload?.confidence || action.confidence) * 100).toFixed(0)}%
-                        </span>
-                      )}
+          <div className="flex-1 p-8 md:p-12 overflow-y-auto">
+            <div className="max-w-4xl mx-auto">
+                <h2 className="text-3xl font-bold text-white mb-8 flex items-center">
+                    <ShieldAlert className="mr-3 text-red-500" size={32}/> Action Center
+                </h2>
+                
+                <div className="space-y-4">
+                {pendingActions.length === 0 ? (
+                    <div className="text-center py-20 border-2 border-dashed border-zinc-900 rounded-2xl text-zinc-600">
+                        <p>No actions pending approval.</p>
                     </div>
-                    <p className="text-lg font-medium">
-                        {action.payload?.description || action.description || 'Action requiring approval'}
-                    </p>
-                  </div>
-                  <div className="flex gap-3">
-                    <button onClick={() => handleApprove(action.id, false)} className="p-2 hover:bg-red-500/20 text-red-400 rounded-lg transition border border-transparent hover:border-red-500/50">
-                      <X size={20}/>
-                    </button>
-                    <button onClick={() => handleApprove(action.id, true)} className="p-2 bg-green-600 hover:bg-green-500 text-white rounded-lg transition shadow-lg shadow-green-900/20">
-                      <Check size={20}/>
-                    </button>
-                  </div>
+                ) : ( 
+                pendingActions.map((action) => (
+                    <div key={action.id} className="bg-zinc-900 border border-zinc-800 p-6 rounded-2xl flex items-center justify-between shadow-lg group hover:border-zinc-700 transition-all">
+                        <div>
+                            <div className="flex items-center gap-3 mb-2">
+                                <span className="bg-blue-500/10 text-blue-400 text-[10px] px-2 py-1 rounded-full uppercase font-bold tracking-wider border border-blue-500/20">
+                                    {action.action_type || action.type}
+                                </span>
+                                <span className="text-zinc-500 text-xs">
+                                    Confidence: {((action.payload?.confidence || action.confidence) * 100).toFixed(0)}%
+                                </span>
+                            </div>
+                            <p className="text-lg font-medium text-zinc-200">
+                                {action.payload?.description || action.description}
+                            </p>
+                        </div>
+                        <div className="flex gap-3">
+                            <button onClick={() => handleApprove(action.id, false)} className="p-3 hover:bg-red-500/10 text-red-500 rounded-xl transition border border-transparent hover:border-red-500/30">
+                                <X size={24}/>
+                            </button>
+                            <button onClick={() => handleApprove(action.id, true)} className="p-3 bg-white hover:bg-zinc-200 text-black rounded-xl transition shadow-lg shadow-white/10">
+                                <Check size={24}/>
+                            </button>
+                        </div>
+                    </div>
+                )))}
                 </div>
-              )))}
             </div>
           </div>
         )}
