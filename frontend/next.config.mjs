@@ -4,10 +4,9 @@ const nextConfig = {
   async rewrites() {
     return [
       {
-        // Capture any request to /api/v1/...
         source: '/api/v1/:path*',
-        // Proxy it to Render
-        destination: `${process.env.ORCHESTRATOR_URL}/api/v1/:path*`,
+        // HARDCODED URL to rule out environment variable issues
+        destination: 'https://nexus-orchestrator-vad4.onrender.com/api/v1/:path*',
       },
     ]
   },
