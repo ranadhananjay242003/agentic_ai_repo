@@ -6,10 +6,12 @@ use tracing::{info, error};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use serde_json::{json, Value};
-// Email Imports - Critical for the fix
+// Email Imports
 use lettre::{Message, AsyncTransport, Tokio1Executor, AsyncSmtpTransport};
 use lettre::message::Mailbox; 
 use lettre::transport::smtp::authentication::Credentials;
+// NEW IMPORTS FOR TLS CONFIGURATION
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use std::env;
 
 #[derive(Serialize, FromRow)]
@@ -99,9 +101,11 @@ async fn send_real_email(payload: &Value) -> Result<(), String> {
     if smtp_user.is_empty() || smtp_pass.is_empty() { return Err("SMTP creds missing".to_string()); }
 
     let description = payload["description"].as_str().unwrap_or("No description");
-    let recipient = payload["recipient"].as_str().unwrap_or("admin@example.com");
+    let mut recipient = payload["recipient"].as_str().unwrap_or("admin@example.com");
+    if recipient == "admin@example.com" { recipient = &smtp_user; }
 
-    // FIX: Added explicit <Mailbox> type annotation
+    info!("Sending email to: {}", recipient);
+
     let email = Message::builder()
         .from(format!("Agentic AI <{}>", smtp_user).parse::<Mailbox>().unwrap())
         .to(recipient.parse::<Mailbox>().map_err(|e| e.to_string())?)
@@ -110,8 +114,18 @@ async fn send_real_email(payload: &Value) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let creds = Credentials::new(smtp_user, smtp_pass);
+    
+    // --- THE FIX: Force Port 465 + Wrapper TLS ---
+    let tls_parameters = TlsParameters::new(smtp_host.clone())
+        .map_err(|e| e.to_string())?;
+
     let mailer: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_host)
-        .map_err(|e| e.to_string())?.credentials(creds).build();
+        .map_err(|e| e.to_string())?
+        .port(465) 
+        .tls(Tls::Wrapper(tls_parameters)) // Forces SSL/TLS immediately
+        .credentials(creds)
+        .build();
+
     mailer.send(email).await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -123,9 +137,7 @@ async fn create_real_jira_ticket(payload: &Value) -> Result<(), String> {
     let token = env::var("JIRA_TOKEN").unwrap_or_default();
     let project_key = env::var("JIRA_PROJECT_KEY").unwrap_or("KAN".to_string());
 
-    if domain.is_empty() || user.is_empty() || token.is_empty() {
-        return Err("Jira credentials missing in docker-compose".to_string());
-    }
+    if domain.is_empty() { return Err("Jira credentials missing".to_string()); }
 
     let summary = payload["description"].as_str().unwrap_or("AI Generated Ticket");
     let url = format!("{}/rest/api/3/issue", domain);
