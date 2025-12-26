@@ -176,6 +176,10 @@ class ExtractionResponse(BaseModel):
     total_chars: int
     passages: List[Passage]
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "ingestion"}
+
 @app.post("/extract", response_model=ExtractionResponse)
 async def extract_document(file: UploadFile = File(...)):
     try:
